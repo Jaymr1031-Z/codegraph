@@ -175,6 +175,53 @@ class ENGINE_API UNetConnectionRepControl : public UObject
     expect(detectLanguage('cfoo.h', '#ifndef CFOO_H\nstruct Point { int x; int y; };\nvoid f(struct Point p);\n#endif\n')).toBe('c');
   });
 
+  it('should detect a .h whose only C++ signal is a plain base clause as cpp (#1592)', () => {
+    // No export macro, no `class` keyword, no access section, no `virtual`:
+    // the derived struct's base clause is the only C++ construct, and the
+    // #1159 branch only knows the macro-annotated form. Misdetected as C, the
+    // C extractor drops `Derived` and mints a phantom `function Base`.
+    expect(detectLanguage('min.h', 'struct Base {};\nstruct Derived : Base {};\n')).toBe('cpp');
+    expect(detectLanguage('pub.h', 'struct Derived : public Base {};\n')).toBe('cpp');
+    expect(detectLanguage('scoped.h', 'struct Derived : ns::Base {};\n')).toBe('cpp');
+    expect(detectLanguage('tmpl.h', 'struct Derived : Base<int, Foo<T>> {};\n')).toBe('cpp');
+    expect(detectLanguage('final.h', 'struct Derived final : Base {};\n')).toBe('cpp');
+    expect(detectLanguage('multi.h', 'class Derived : public A, private B\n{\n};\n')).toBe('cpp');
+    expect(detectLanguage('virt.h', 'struct Derived : virtual Base {};\n')).toBe('cpp');
+
+    // The base clause sits PAST the 8 KB sample, behind a long C-compatible
+    // preamble (guards, defines, plain typedefs) — the second pass must scan
+    // the whole file, not just the sample.
+    const preamble = '#ifndef BIG_H\n#define BIG_H\n' + '#define VALUE_0 0\n'.repeat(700);
+    expect(preamble.length).toBeGreaterThan(8192);
+    expect(detectLanguage('big.h', `${preamble}struct Base {};\nstruct Derived : Base {};\n#endif\n`)).toBe('cpp');
+
+    // Controls — all genuine C, none may flip to C++:
+    // a bit-field (`:` after a member name inside the body),
+    expect(detectLanguage('bits.h', 'struct S { unsigned int a : 3; unsigned int b : 5; };\n')).toBe('c');
+    // a ternary whose `:` follows a `sizeof(struct …)` / cast,
+    expect(detectLanguage('tern.h', 'static inline int sz(int x) { return x ? sizeof(struct foo) : 0; }\n#define P(a,b) ((a) ? (struct foo *)(a) : (b))\n')).toBe('c');
+    // a label / identifier that merely starts with `struct`,
+    expect(detectLanguage('label.h', 'static void g(void) {\nstruct_end:\n  return;\n}\nint struct_a, struct_b;\n')).toBe('c');
+    // a doc comment whose prose reads like a base clause,
+    expect(detectLanguage('doc.h', '/* struct timeval: seconds, microseconds */\nstruct timeval { long tv_sec; long tv_usec; };\n// struct foo: x, y\n')).toBe('c');
+    // and the two existing controls.
+    expect(detectLanguage('cfoo.h', '#ifndef CFOO_H\nstruct Point { int x; int y; };\nvoid f(struct Point p);\n#endif\n')).toBe('c');
+    expect(detectLanguage('stdio.h', '#ifndef STDIO_H\nvoid printf();\n#endif\n')).toBe('c');
+  });
+
+  it('should extract a derived struct from a plain base-clause .h, with no phantom function (#1592)', () => {
+    const result = extractFromSource('src/min.h', 'struct Base {};\nstruct Derived : Base {};\n');
+    const derived = result.nodes.find((n) => n.name === 'Derived');
+    expect(derived).toBeDefined();
+    expect(derived?.kind).toBe('struct');
+    expect(derived?.language).toBe('cpp');
+    // The C mis-route read `Derived : Base {}` as a K&R-ish function `Base`
+    // returning `Derived` — that phantom must be gone.
+    expect(result.nodes.some((n) => n.name === 'Base' && n.kind === 'function')).toBe(false);
+    expect(result.nodes.filter((n) => n.name === 'Base')).toHaveLength(1);
+    expect(result.nodes.find((n) => n.name === 'Base')?.kind).toBe('struct');
+  });
+
   it('should return unknown for unsupported extensions', () => {
     expect(detectLanguage('styles.css')).toBe('unknown');
     expect(detectLanguage('data.json')).toBe('unknown');
@@ -1129,6 +1176,146 @@ impl Cache for MyCache {
     const myCacheNode = result.nodes.find((n) => n.name === 'MyCache' && n.kind === 'struct');
     expect(myCacheNode).toBeDefined();
     expect(implRef?.fromNodeId).toBe(myCacheNode?.id);
+  });
+
+  it('qualifies methods of a generic or lifetime impl by the implementing type, not the trait (#1588)', () => {
+    const code = `
+pub trait Source {
+    fn read(&mut self) -> usize;
+}
+
+pub struct FileSource { pub n: usize }
+impl Source for FileSource {
+    fn read(&mut self) -> usize { self.n }
+}
+
+pub struct BufSource<T> { pub inner: T }
+impl<T> Source for BufSource<T> {
+    fn read(&mut self) -> usize { 0 }
+}
+
+pub struct Parents<'a> { cur: &'a u32 }
+impl<'a> Iterator for Parents<'a> {
+    type Item = u32;
+    fn next(&mut self) -> Option<u32> { None }
+}
+
+pub struct Wrapper { pub n: usize }
+impl Source for &Wrapper {
+    fn read(&mut self) -> usize { 1 }
+}
+
+pub mod m { pub struct Scoped { pub n: usize } }
+impl Source for m::Scoped {
+    fn read(&mut self) -> usize { 2 }
+}
+
+pub struct Own { pub n: usize }
+impl From<u32> for Own {
+    fn from(n: u32) -> Self { Own { n: n as usize } }
+}
+`;
+    const result = extractFromSource('src.rs', code);
+
+    // Every impl method is qualified by the IMPLEMENTING type. Before, a
+    // parameterized implementing type (`BufSource<T>`, `Parents<'a>`, `&Wrapper`)
+    // left the trait's identifier as the only bare type_identifier child of the
+    // impl, so those methods were recorded as `Source::read` / `Iterator::next`.
+    const methodQns = result.nodes
+      .filter((n) => n.kind === 'method')
+      .map((n) => n.qualifiedName)
+      .sort();
+    expect(methodQns).toEqual([
+      'BufSource::read',
+      'FileSource::read',
+      'Own::from',
+      'Parents::next',
+      'Scoped::read',
+      'Source::read',
+      'Wrapper::read',
+    ]);
+    // The trait's qualified name now names exactly one node: its declaration.
+    const traitRead = result.nodes.filter((n) => n.qualifiedName === 'Source::read');
+    expect(traitRead).toHaveLength(1);
+    expect(traitRead[0]!.startLine).toBe(3);
+
+    // The implements back-reference comes FROM the implementing type's node
+    // for every impl shape, named by the trait's full text.
+    const implementsFrom = (typeName: string): string[] => {
+      const typeNode = result.nodes.find((n) => n.name === typeName && n.kind === 'struct');
+      expect(typeNode, typeName).toBeDefined();
+      return result.unresolvedReferences
+        .filter((r) => r.referenceKind === 'implements' && r.fromNodeId === typeNode!.id)
+        .map((r) => r.referenceName);
+    };
+    expect(implementsFrom('FileSource')).toEqual(['Source']);
+    expect(implementsFrom('BufSource')).toEqual(['Source']);
+    expect(implementsFrom('Parents')).toEqual(['Iterator']);
+    expect(implementsFrom('Wrapper')).toEqual(['Source']);
+    expect(implementsFrom('Scoped')).toEqual(['Source']);
+    expect(implementsFrom('Own')).toEqual(['From<u32>']);
+
+    // …and the owner `contains` edge lands on the implementing type too.
+    const buf = result.nodes.find((n) => n.name === 'BufSource' && n.kind === 'struct')!;
+    const bufRead = result.nodes.find((n) => n.qualifiedName === 'BufSource::read')!;
+    expect(
+      result.edges.some((e) => e.kind === 'contains' && e.source === buf.id && e.target === bufRead.id)
+    ).toBe(true);
+  });
+
+  it('keeps the owner-field shape for `self.<field>.<method>()` and collapses every other receiver (#1585)', () => {
+    const code = `
+pub struct Outer { pub inner: Inner, pub deep: Deep }
+impl Outer {
+    pub fn run(&mut self) {
+        self.inner.run();
+        self.deep.inner.run();
+        self.make().run();
+        (self.inner).run();
+        self.run();
+        let local = Inner { n: 0 };
+        local.run();
+    }
+}
+`;
+    const result = extractFromSource('outer.rs', code);
+    const calls = result.unresolvedReferences
+      .filter((r) => r.referenceKind === 'calls')
+      .map((r) => r.referenceName);
+    // Exactly one call keeps the `self.<field>` prefix — the single-hop field
+    // receiver whose type the resolver can read off the owner struct.
+    expect(calls.filter((c) => c.startsWith('self.'))).toEqual(['self.inner.run']);
+    // A local receiver keeps its name as before…
+    expect(calls).toContain('local.run');
+    // …and the deeper chain, the call receiver, the parenthesized receiver and
+    // the bare `self` receiver all still collapse to the method name.
+    expect(calls.filter((c) => c === 'run')).toHaveLength(4);
+    expect(calls).toContain('make');
+    const outerRun = result.nodes.find((n) => n.qualifiedName === 'Outer::run');
+    expect(outerRun).toBeDefined();
+    const fieldRef = result.unresolvedReferences.find((r) => r.referenceName === 'self.inner.run');
+    expect(fieldRef?.fromNodeId).toBe(outerRun!.id);
+    expect(fieldRef?.line).toBe(5);
+  });
+
+  it('gives no receiver to an impl whose target names no single type', () => {
+    // A tuple / `dyn Trait` / primitive implementing type has no struct to
+    // hang the methods off, so they are extracted as plain functions — the
+    // pre-#1588 behavior for these shapes, minus the trait mis-qualification.
+    const code = `
+pub trait Base { fn id(&self) -> u32; }
+impl Base for (u32, u32) {
+    fn id(&self) -> u32 { 0 }
+}
+impl Base for dyn Base {
+    fn id(&self) -> u32 { 1 }
+}
+`;
+    const result = extractFromSource('src.rs', code);
+    const ids = result.nodes.filter((n) => n.name === 'id');
+    expect(ids.map((n) => n.qualifiedName).sort()).toEqual(['Base::id', 'id', 'id']);
+    expect(ids.filter((n) => n.kind === 'function')).toHaveLength(2);
+    expect(result.unresolvedReferences.filter((r) => r.referenceKind === 'implements')).toHaveLength(0);
   });
 
   it('should extract trait supertraits as extends references', () => {
