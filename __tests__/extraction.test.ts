@@ -1178,6 +1178,146 @@ impl Cache for MyCache {
     expect(implRef?.fromNodeId).toBe(myCacheNode?.id);
   });
 
+  it('qualifies methods of a generic or lifetime impl by the implementing type, not the trait (#1588)', () => {
+    const code = `
+pub trait Source {
+    fn read(&mut self) -> usize;
+}
+
+pub struct FileSource { pub n: usize }
+impl Source for FileSource {
+    fn read(&mut self) -> usize { self.n }
+}
+
+pub struct BufSource<T> { pub inner: T }
+impl<T> Source for BufSource<T> {
+    fn read(&mut self) -> usize { 0 }
+}
+
+pub struct Parents<'a> { cur: &'a u32 }
+impl<'a> Iterator for Parents<'a> {
+    type Item = u32;
+    fn next(&mut self) -> Option<u32> { None }
+}
+
+pub struct Wrapper { pub n: usize }
+impl Source for &Wrapper {
+    fn read(&mut self) -> usize { 1 }
+}
+
+pub mod m { pub struct Scoped { pub n: usize } }
+impl Source for m::Scoped {
+    fn read(&mut self) -> usize { 2 }
+}
+
+pub struct Own { pub n: usize }
+impl From<u32> for Own {
+    fn from(n: u32) -> Self { Own { n: n as usize } }
+}
+`;
+    const result = extractFromSource('src.rs', code);
+
+    // Every impl method is qualified by the IMPLEMENTING type. Before, a
+    // parameterized implementing type (`BufSource<T>`, `Parents<'a>`, `&Wrapper`)
+    // left the trait's identifier as the only bare type_identifier child of the
+    // impl, so those methods were recorded as `Source::read` / `Iterator::next`.
+    const methodQns = result.nodes
+      .filter((n) => n.kind === 'method')
+      .map((n) => n.qualifiedName)
+      .sort();
+    expect(methodQns).toEqual([
+      'BufSource::read',
+      'FileSource::read',
+      'Own::from',
+      'Parents::next',
+      'Scoped::read',
+      'Source::read',
+      'Wrapper::read',
+    ]);
+    // The trait's qualified name now names exactly one node: its declaration.
+    const traitRead = result.nodes.filter((n) => n.qualifiedName === 'Source::read');
+    expect(traitRead).toHaveLength(1);
+    expect(traitRead[0]!.startLine).toBe(3);
+
+    // The implements back-reference comes FROM the implementing type's node
+    // for every impl shape, named by the trait's full text.
+    const implementsFrom = (typeName: string): string[] => {
+      const typeNode = result.nodes.find((n) => n.name === typeName && n.kind === 'struct');
+      expect(typeNode, typeName).toBeDefined();
+      return result.unresolvedReferences
+        .filter((r) => r.referenceKind === 'implements' && r.fromNodeId === typeNode!.id)
+        .map((r) => r.referenceName);
+    };
+    expect(implementsFrom('FileSource')).toEqual(['Source']);
+    expect(implementsFrom('BufSource')).toEqual(['Source']);
+    expect(implementsFrom('Parents')).toEqual(['Iterator']);
+    expect(implementsFrom('Wrapper')).toEqual(['Source']);
+    expect(implementsFrom('Scoped')).toEqual(['Source']);
+    expect(implementsFrom('Own')).toEqual(['From<u32>']);
+
+    // …and the owner `contains` edge lands on the implementing type too.
+    const buf = result.nodes.find((n) => n.name === 'BufSource' && n.kind === 'struct')!;
+    const bufRead = result.nodes.find((n) => n.qualifiedName === 'BufSource::read')!;
+    expect(
+      result.edges.some((e) => e.kind === 'contains' && e.source === buf.id && e.target === bufRead.id)
+    ).toBe(true);
+  });
+
+  it('keeps the owner-field shape for `self.<field>.<method>()` and collapses every other receiver (#1585)', () => {
+    const code = `
+pub struct Outer { pub inner: Inner, pub deep: Deep }
+impl Outer {
+    pub fn run(&mut self) {
+        self.inner.run();
+        self.deep.inner.run();
+        self.make().run();
+        (self.inner).run();
+        self.run();
+        let local = Inner { n: 0 };
+        local.run();
+    }
+}
+`;
+    const result = extractFromSource('outer.rs', code);
+    const calls = result.unresolvedReferences
+      .filter((r) => r.referenceKind === 'calls')
+      .map((r) => r.referenceName);
+    // Exactly one call keeps the `self.<field>` prefix — the single-hop field
+    // receiver whose type the resolver can read off the owner struct.
+    expect(calls.filter((c) => c.startsWith('self.'))).toEqual(['self.inner.run']);
+    // A local receiver keeps its name as before…
+    expect(calls).toContain('local.run');
+    // …and the deeper chain, the call receiver, the parenthesized receiver and
+    // the bare `self` receiver all still collapse to the method name.
+    expect(calls.filter((c) => c === 'run')).toHaveLength(4);
+    expect(calls).toContain('make');
+    const outerRun = result.nodes.find((n) => n.qualifiedName === 'Outer::run');
+    expect(outerRun).toBeDefined();
+    const fieldRef = result.unresolvedReferences.find((r) => r.referenceName === 'self.inner.run');
+    expect(fieldRef?.fromNodeId).toBe(outerRun!.id);
+    expect(fieldRef?.line).toBe(5);
+  });
+
+  it('gives no receiver to an impl whose target names no single type', () => {
+    // A tuple / `dyn Trait` / primitive implementing type has no struct to
+    // hang the methods off, so they are extracted as plain functions — the
+    // pre-#1588 behavior for these shapes, minus the trait mis-qualification.
+    const code = `
+pub trait Base { fn id(&self) -> u32; }
+impl Base for (u32, u32) {
+    fn id(&self) -> u32 { 0 }
+}
+impl Base for dyn Base {
+    fn id(&self) -> u32 { 1 }
+}
+`;
+    const result = extractFromSource('src.rs', code);
+    const ids = result.nodes.filter((n) => n.name === 'id');
+    expect(ids.map((n) => n.qualifiedName).sort()).toEqual(['Base::id', 'id', 'id']);
+    expect(ids.filter((n) => n.kind === 'function')).toHaveLength(2);
+    expect(result.unresolvedReferences.filter((r) => r.referenceKind === 'implements')).toHaveLength(0);
+  });
+
   it('should extract trait supertraits as extends references', () => {
     const code = `
 pub trait Display {}
