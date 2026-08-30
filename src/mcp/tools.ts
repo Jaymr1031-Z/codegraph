@@ -1248,26 +1248,6 @@ export const tools: ToolDefinition[] = [
     annotations: READ_ONLY_ANNOTATIONS,
   },
   {
-    name: 'codegraph_trace',
-    description: 'Find the multi-hop call or dependency path between two symbols (from -> to).',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        from: {
-          type: 'string',
-          description: 'Starting symbol name',
-        },
-        to: {
-          type: 'string',
-          description: 'Target symbol name',
-        },
-        projectPath: projectPathProperty,
-      },
-      required: ['from', 'to'],
-    },
-    annotations: READ_ONLY_ANNOTATIONS,
-  },
-  {
     name: 'codegraph_export',
     description: 'Export code knowledge graph or symbol call graph to Mermaid, DOT, or JSON format for visualization.',
     inputSchema: {
@@ -2224,46 +2204,11 @@ export class ToolHandler {
       case 'codegraph_explore': return await this.handleExplore(args);
       case 'codegraph_node': return await this.handleNode(args);
       case 'codegraph_files': return await this.handleFiles(args);
-      case 'codegraph_trace': return await this.handleTrace(args);
       case 'codegraph_export': return await this.handleExport(args);
       case 'codegraph_metrics': return await this.handleMetrics(args);
       default: return this.errorResult(`Unknown tool: ${toolName}`);
     }
 
-  }
-
-  /**
-   * Handle codegraph_trace
-   */
-  private async handleTrace(args: Record<string, unknown>): Promise<ToolResult> {
-    const from = this.validateString(args.from, 'from');
-    if (typeof from !== 'string') return from;
-    const to = this.validateString(args.to, 'to');
-    if (typeof to !== 'string') return to;
-
-    const cg = this.getCodeGraph(args.projectPath as string | undefined);
-    const pathResult = cg.findPathBetweenSymbols(from, to);
-
-    if (!pathResult || pathResult.length === 0) {
-      return this.textResult(`No call or dependency path found between "${from}" and "${to}".`);
-    }
-
-    const lines: string[] = [
-      `**Path from ${from} to ${to} (${pathResult.length - 1} hops):**\n`,
-    ];
-
-    for (let i = 0; i < pathResult.length; i++) {
-      const step = pathResult[i]!;
-      const loc = step.node.startLine ? `:${step.node.startLine}` : '';
-      if (i === 0) {
-        lines.push(`- **${step.node.name}** (${step.node.kind}) in \`${step.node.filePath}${loc}\``);
-      } else {
-        const edgeKind = step.edge?.kind || 'references';
-        lines.push(`  ↳ *${edgeKind}* → **${step.node.name}** (${step.node.kind}) in \`${step.node.filePath}${loc}\``);
-      }
-    }
-
-    return this.textResult(this.truncateOutput(lines.join('\n')));
   }
 
   /**
@@ -2288,7 +2233,7 @@ export class ToolHandler {
           edges: [] as any[],
           roots: [] as string[],
         };
-        for (const f of files.slice(0, 30)) {
+        for (const f of files) {
           const fnodes = cg.getNodesInFile(f.path);
           for (const fn of fnodes) {
             fullSubgraph.nodes.set(fn.id, fn);
@@ -2299,7 +2244,7 @@ export class ToolHandler {
         }
         output = cg.exportGraph(fullSubgraph, { format, direction, title: 'Project Structure' });
       }
-      return this.textResult(output);
+      return this.textResult(this.truncateOutput(output));
     } catch (err) {
       return this.textResult(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
     }

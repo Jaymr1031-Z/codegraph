@@ -1886,31 +1886,6 @@ export class CodeGraph {
   }
 
   /**
-   * Find a path between two symbol names
-   *
-   * @param fromSymbol - Starting symbol name (exact or search match)
-   * @param toSymbol - Target symbol name (exact or search match)
-   * @param edgeKinds - Optional edge kinds filter
-   */
-  findPathBetweenSymbols(
-    fromSymbol: string,
-    toSymbol: string,
-    edgeKinds?: Edge['kind'][]
-  ): Array<{ node: Node; edge: Edge | null }> | null {
-    const fromMatches = this.queries.getNodesByName(fromSymbol);
-    const toMatches = this.queries.getNodesByName(toSymbol);
-
-    const fromNode = fromMatches[0] ?? this.queries.searchNodes(fromSymbol, { limit: 1 })[0]?.node;
-    const toNode = toMatches[0] ?? this.queries.searchNodes(toSymbol, { limit: 1 })[0]?.node;
-
-    if (!fromNode || !toNode) {
-      return null;
-    }
-
-    return this.traverser.findPath(fromNode.id, toNode.id, edgeKinds);
-  }
-
-  /**
    * Export a subgraph to Mermaid, Graphviz DOT, or JSON
    *
    * @param subgraph - Subgraph to export

@@ -2336,73 +2336,6 @@ program
   });
 
 /**
- * codegraph trace <from> <to>
- */
-program
-  .command('trace <from> <to>')
-  .description('Trace the shortest call or dependency path between two symbols')
-  .option('-p, --path <path>', 'Project path')
-  .option('-j, --json', 'Output as JSON')
-  .action(async (from: string, to: string, options: { path?: string; json?: boolean }) => {
-    const projectPath = resolveProjectPath(options.path);
-
-    try {
-      if (!isInitialized(projectPath)) {
-        error(`CodeGraph not initialized in ${projectPath}`);
-        process.exit(1);
-      }
-
-      const { default: CodeGraph } = await loadCodeGraph();
-      const cg = await CodeGraph.open(projectPath);
-
-      const pathResult = cg.findPathBetweenSymbols(from, to);
-
-      if (!pathResult || pathResult.length === 0) {
-        if (options.json) {
-          console.log(JSON.stringify({ from, to, found: false, path: [] }, null, 2));
-        } else {
-          info(`No path found between "${from}" and "${to}".`);
-        }
-        cg.destroy();
-        return;
-      }
-
-      if (options.json) {
-        const formatted = pathResult.map((step) => ({
-          name: step.node.name,
-          kind: step.node.kind,
-          filePath: step.node.filePath,
-          startLine: step.node.startLine,
-          edgeKind: step.edge?.kind ?? null,
-        }));
-        console.log(JSON.stringify({ from, to, found: true, hops: pathResult.length - 1, path: formatted }, null, 2));
-      } else {
-        console.log(chalk.bold(`\nPath from "${from}" to "${to}" (${pathResult.length - 1} hops):\n`));
-        for (let i = 0; i < pathResult.length; i++) {
-          const step = pathResult[i]!;
-          const loc = step.node.startLine ? `:${step.node.startLine}` : '';
-          const nodeStr = `${chalk.cyan(step.node.name)} ${chalk.dim(`(${step.node.kind} — ${step.node.filePath}${loc})`)}`;
-
-          if (i === 0) {
-            console.log(`  ${chalk.green('●')} ${nodeStr}`);
-          } else {
-            const edgeKind = pathResult[i]?.edge?.kind || 'references';
-            console.log(`    ${chalk.dim('│')}`);
-            console.log(`    ${chalk.dim('▼')} ${chalk.yellow(`[${edgeKind}]`)}`);
-            console.log(`  ${i === pathResult.length - 1 ? chalk.red('◼') : chalk.green('●')} ${nodeStr}`);
-          }
-        }
-        console.log();
-      }
-
-      cg.destroy();
-    } catch (err) {
-      error(`Trace failed: ${err instanceof Error ? err.message : String(err)}`);
-      process.exit(1);
-    }
-  });
-
-/**
  * codegraph export [symbol]
  */
 program
@@ -2452,7 +2385,7 @@ program
           edges: [] as any[],
           roots: [] as string[],
         };
-        for (const f of files.slice(0, 30)) {
+        for (const f of files) {
           const fnodes = cg.getNodesInFile(f.path);
           for (const fn of fnodes) {
             fullSubgraph.nodes.set(fn.id, fn);

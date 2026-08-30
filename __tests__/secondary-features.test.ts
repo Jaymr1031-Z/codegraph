@@ -1,12 +1,11 @@
 /**
  * Secondary Development Features Test Suite
  *
- * Tests for the 5 newly implemented features:
+ * Tests for the newly implemented features:
  * 1. Visual Graph Exporter (Mermaid, DOT, JSON)
- * 2. Multi-hop Call Path Tracing (findPathBetweenSymbols)
- * 3. Architectural & Coupling Metrics (Afferent/Efferent coupling, Instability, Hotspots)
- * 4. Dead Code & Circular Dependency Auditor (auditProject)
- * 5. MCP Tool Handlers (codegraph_trace, codegraph_export, codegraph_metrics)
+ * 2. Architectural & Coupling Metrics (Afferent/Efferent coupling, Instability, Hotspots)
+ * 3. Dead Code & Circular Dependency Auditor (auditProject)
+ * 4. MCP Tool Handlers (codegraph_export, codegraph_metrics)
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -160,25 +159,7 @@ export function bootstrap(): void {
     });
   });
 
-  describe('Feature 2: Multi-hop Call Path Tracing', () => {
-    it('finds path from bootstrap to validate across multiple hops', () => {
-      const pathResult = cg.findPathBetweenSymbols('bootstrap', 'validate');
-
-      expect(pathResult).not.toBeNull();
-      expect(pathResult!.length).toBeGreaterThanOrEqual(2);
-
-      const names = pathResult!.map((p) => p.node.name);
-      expect(names[0]).toBe('bootstrap');
-      expect(names[names.length - 1]).toBe('validate');
-    });
-
-    it('returns null when no path exists between disconnected symbols', () => {
-      const pathResult = cg.findPathBetweenSymbols('validate', 'unusedAuthSecret');
-      expect(pathResult).toBeNull();
-    });
-  });
-
-  describe('Feature 3: Architectural & Coupling Metrics', () => {
+  describe('Feature 2: Architectural & Coupling Metrics', () => {
     it('calculates file coupling and instability index', () => {
       const analyzer = new MetricsAnalyzer((cg as any).queries);
       const fileMetrics = analyzer.computeFileMetrics();
@@ -206,7 +187,7 @@ export function bootstrap(): void {
     });
   });
 
-  describe('Feature 4: Dead Code & Circular Dependency Audit', () => {
+  describe('Feature 3: Dead Code & Circular Dependency Audit', () => {
     it('detects unreferenced non-exported functions as dead code', () => {
       const audit = cg.auditProject();
 
@@ -221,24 +202,11 @@ export function bootstrap(): void {
     });
   });
 
-  describe('Feature 5: MCP Tool Suite Extension', () => {
+  describe('Feature 4: MCP Tool Suite Extension', () => {
     let handler: ToolHandler;
 
     beforeEach(() => {
       handler = new ToolHandler(cg);
-    });
-
-    it('executes codegraph_trace MCP tool successfully', async () => {
-      const result = await handler.execute('codegraph_trace', {
-        from: 'bootstrap',
-        to: 'validate',
-      });
-
-      expect(result.isError).toBeFalsy();
-      const text = result.content[0]?.text ?? '';
-      expect(text).toContain('Path from bootstrap to validate');
-      expect(text).toContain('bootstrap');
-      expect(text).toContain('validate');
     });
 
     it('executes codegraph_export MCP tool successfully', async () => {
@@ -251,6 +219,23 @@ export function bootstrap(): void {
       const text = result.content[0]?.text ?? '';
       expect(text).toContain('graph TD');
       expect(text).toContain('UserController');
+    });
+
+    it('exports all indexed files in project mode', async () => {
+      for (let i = 1; i <= 31; i++) {
+        fs.writeFileSync(
+          path.join(testDir, 'src', `extra-${i}.ts`),
+          `export function extra${i}(): number { return ${i}; }\n`
+        );
+      }
+      await cg.indexAll();
+      cg.resolveReferences();
+
+      const result = await handler.execute('codegraph_export', {});
+
+      expect(result.isError).toBeFalsy();
+      const text = result.content[0]?.text ?? '';
+      expect(text).toContain('extra-31.ts');
     });
 
     it('executes codegraph_metrics MCP tool successfully', async () => {
